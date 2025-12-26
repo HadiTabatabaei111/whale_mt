@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📊 آمار و تحلیل سیگنالها</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Vazirmatn', sans-serif;
+            background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 100%);
+            color: #fff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header h1 { font-size: 2em; margin-bottom: 10px; }
+        .nav-links a {
+            color: white;
+            text-decoration: none;
+            padding: 8px 20px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 20px;
+            margin: 0 5px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .stat-box {
+            background: linear-gradient(135deg, rgba(102,126,234,0.3), rgba(118,75,162,0.3));
+            padding: 25px;
+            border-radius: 15px;
+            text-align: center;
+        }
+        .stat-box .value { font-size: 2.5em; font-weight: bold; }
+        .stat-box .label { color: #a4b0be; margin-top: 5px; }
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .chart-card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 15px;
+            padding: 20px;
+        }
+        .chart-card h3 { margin-bottom: 15px; }
+        .history-table {
+            background: rgba(255,255,255,0.05);
+            border-radius: 15px;
+            padding: 20px;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 12px;
+            text-align: right;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        th { background: rgba(102,126,234,0.3); }
+        .success { color: #00ff88; }
+        .failed { color: #ff4757; }
+        .active { color: #ffa502; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 آمار و تحلیل سیگنالها</h1>
+        <div class="nav-links">
+            <a href="/">داشبورد</a>
+            <a href="/analytics">آمار و تحلیل</a>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="stats-row">
+            <div class="stat-box">
+                <div class="value" id="total-signals">0</div>
+                <div class="label">کل سیگنالها</div>
+            </div>
+            <div class="stat-box">
+                <div class="value success" id="wins">0</div>
+                <div class="label">موفق</div>
+            </div>
+            <div class="stat-box">
+                <div class="value failed" id="losses">0</div>
+                <div class="label">ناموفق</div>
+            </div>
+            <div class="stat-box">
+                <div class="value" id="win-rate">0%</div>
+                <div class="label">نرخ موفقیت</div>
+            </div>
+            <div class="stat-box">
+                <div class="value" id="avg-profit">0%</div>
+                <div class="label">میانگین سود</div>
+            </div>
+        </div>
+
+        <div class="chart-grid">
+            <div class="chart-card">
+                <h3>📈 توزیع سیگنالها</h3>
+                <canvas id="signalChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>📊 نتایج اعتبارسنجی</h3>
+                <canvas id="validationChart"></canvas>
+            </div>
+        </div>
+
+        <div class="history-table">
+            <h3>📋 تاریخچه سیگنالها (7 روز اخیر)</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>نماد</th>
+                        <th>نوع</th>
+                        <th>جهت</th>
+                        <th>قیمت ورود</th>
+                        <th>قدرت</th>
+                        <th>وضعیت</th>
+                        <th>سود/زیان</th>
+                        <th>زمان</th>
+                    </tr>
+                </thead>
+                <tbody id="history-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // بارگذاری آمار
+        fetch('/api/stats')
+            .then(r => r.json())
+            .then(stats => {
+                document.getElementById('total-signals').textContent = stats.total || 0;
+                document.getElementById('wins').textContent = stats.wins || 0;
+                document.getElementById('losses').textContent = stats.losses || 0;
+
+                const winRate = stats.total > 0 ? ((stats.wins / stats.total) * 100).toFixed(1) : 0;
+                document.getElementById('win-rate').textContent = winRate + '%';
+
+                const avgProfit = stats.avg_profit ? stats.avg_profit.toFixed(2) : 0;
+                document.getElementById('avg-profit').textContent = avgProfit + '%';
+
+                // نمودارها
+                new Chart(document.getElementById('signalChart'), {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['موفق', 'ناموفق', 'فعال'],
+                        datasets: [{
+                            data: [stats.wins || 0, stats.losses || 0, (stats.total - stats.wins - stats.losses) || 0],
+                            backgroundColor: ['#00ff88', '#ff4757', '#ffa502']
+                        }]
+                    },
+                    options: {
+                        plugins: {
+                            legend: { labels: { color: 'white' } }
+                        }
+                    }
+                });
+            });
+
+        // تاریخچه
+        fetch('/api/signals/history?days=7')
+            .then(r => r.json())
+            .then(signals => {
+                const tbody = document.getElementById('history-body');
+                tbody.innerHTML = signals.slice(0, 50).map(s => `
+                    <tr>
+                        <td>${s.symbol}</td>
+                        <td>${s.signal_type}</td>
+                        <td>${s.direction}</td>
+                        <td>${s.entry_price?.toFixed(6) || '-'}</td>
+                        <td>${s.strength}%</td>
+                        <td class="${s.validation_result?.toLowerCase() || 'active'}">
+                            ${s.validation_result || 'فعال'}
+                        </td>
+                        <td class="${(s.profit_loss || 0) >= 0 ? 'success' : 'failed'}">
+                            ${s.profit_loss ? s.profit_loss.toFixed(2) + '%' : '-'}
+                        </td>
+                        <td>${new Date(s.created_at).toLocaleString('fa-IR')}</td>
+                    </tr>
+                `).join('');
+            });
+    </script>
+</body>
+</html>

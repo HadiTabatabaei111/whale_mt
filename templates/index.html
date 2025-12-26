@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🚀 Crypto Futures Signal System</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Vazirmatn', sans-serif;
+            background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 100%);
+            color: #fff;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 4px 20px rgba(102, 126, 234, 0.4);
+        }
+        .header h1 { font-size: 2em; margin-bottom: 10px; }
+        .exchange-selector {
+            background: rgba(255,255,255,0.1);
+            padding: 10px 20px;
+            border-radius: 25px;
+            display: inline-block;
+            margin-top: 10px;
+        }
+        .exchange-selector select {
+            background: transparent;
+            border: none;
+            color: white;
+            font-size: 1.1em;
+            cursor: pointer;
+        }
+        .container { max-width: 1600px; margin: 0 auto; padding: 20px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; }
+        .card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 15px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .card h2 {
+            font-size: 1.3em;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .signal-item {
+            background: rgba(255,255,255,0.05);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-right: 4px solid #667eea;
+            transition: transform 0.2s;
+        }
+        .signal-item:hover { transform: translateX(-5px); }
+        .signal-item.buy { border-right-color: #00ff88; }
+        .signal-item.sell { border-right-color: #ff4757; }
+        .signal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .symbol { font-weight: bold; font-size: 1.1em; }
+        .strength {
+            padding: 3px 10px;
+            border-radius: 15px;
+            font-size: 0.9em;
+        }
+        .strength.high { background: #00ff88; color: #000; }
+        .strength.medium { background: #ffa502; color: #000; }
+        .strength.low { background: #747d8c; }
+        .signal-type {
+            font-size: 0.85em;
+            color: #a4b0be;
+            margin-bottom: 5px;
+        }
+        .reason {
+            font-size: 0.95em;
+            padding: 8px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 5px;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: linear-gradient(135deg, rgba(102,126,234,0.3), rgba(118,75,162,0.3));
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        .stat-value { font-size: 2em; font-weight: bold; }
+        .stat-label { color: #a4b0be; font-size: 0.9em; }
+        .pump-dump-alert {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        .mover-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .positive { color: #00ff88; }
+        .negative { color: #ff4757; }
+        .live-dot {
+            width: 10px;
+            height: 10px;
+            background: #00ff88;
+            border-radius: 50%;
+            animation: blink 1s infinite;
+            display: inline-block;
+            margin-left: 5px;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        .nav-links {
+            margin-top: 10px;
+        }
+        .nav-links a {
+            color: white;
+            text-decoration: none;
+            padding: 8px 20px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 20px;
+            margin: 0 5px;
+        }
+        .nav-links a:hover {
+            background: rgba(255,255,255,0.2);
+        }
+        #signal-list, #pump-dump-list {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .timestamp {
+            font-size: 0.8em;
+            color: #747d8c;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🚀 Crypto Futures Signal System</h1>
+        <div class="exchange-selector">
+            <span>صرافی: </span>
+            <select id="exchange-select" onchange="changeExchange(this.value)">
+                <option value="kucoin">KuCoin</option>
+                <option value="bybit">Bybit</option>
+                <option value="okx">OKX</option>
+                <option value="gate">Gate.io</option>
+                <option value="mexc">MEXC</option>
+                <option value="bitget">Bitget</option>
+            </select>
+        </div>
+        <div class="nav-links">
+            <a href="/">داشبورد</a>
+            <a href="/analytics">آمار و تحلیل</a>
+        </div>
+        <p style="margin-top:10px">
+            <span class="live-dot"></span>
+            <span id="status">در حال اتصال...</span>
+        </p>
+    </div>
+
+    <div class="container">
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value" id="total-signals">0</div>
+                <div class="stat-label">کل سیگنالها</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="buy-signals">0</div>
+                <div class="stat-label">سیگنال خرید</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="sell-signals">0</div>
+                <div class="stat-label">سیگنال فروش</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="pump-dump-count">0</div>
+                <div class="stat-label">پامپ/دامپ</div>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>📊 آخرین سیگنالها <span class="live-dot"></span></h2>
+                <div id="signal-list"></div>
+            </div>
+
+            <div class="card">
+                <h2>🚀 پامپ و دامپ <span class="live-dot"></span></h2>
+                <div id="pump-dump-list"></div>
+            </div>
+
+            <div class="card">
+                <h2>📈 برترین رشدها</h2>
+                <div id="gainers-list"></div>
+            </div>
+
+            <div class="card">
+                <h2>📉 بیشترین افت</h2>
+                <div id="losers-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let allSignals = [];
+        let pumpDumpAlerts = [];
+
+        socket.on('connect', () => {
+            document.getElementById('status').textContent = 'متصل ✅';
+        });
+
+        socket.on('disconnect', () => {
+            document.getElementById('status').textContent = 'قطع شده ❌';
+        });
+
+        socket.on('new_signals', (signals) => {
+            signals.forEach(sig => {
+                allSignals.unshift(sig);
+                if (sig.type && (sig.type.includes('PUMP') || sig.type.includes('DUMP'))) {
+                    pumpDumpAlerts.unshift(sig);
+                }
+            });
+            allSignals = allSignals.slice(0, 100);
+            pumpDumpAlerts = pumpDumpAlerts.slice(0, 50);
+            updateUI();
+        });
+
+        socket.on('cache_update', (cache) => {
+            allSignals = cache.signals || [];
+            pumpDumpAlerts = cache.pump_dump || [];
+            if (cache.movers) {
+                updateMovers(cache.movers);
+            }
+            updateUI();
+        });
+
+        function updateUI() {
+            // آمار
+            document.getElementById('total-signals').textContent = allSignals.length;
+            document.getElementById('buy-signals').textContent =
+                allSignals.filter(s => s.signal === 'BUY').length;
+            document.getElementById('sell-signals').textContent =
+                allSignals.filter(s => s.signal === 'SELL').length;
+            document.getElementById('pump-dump-count').textContent = pumpDumpAlerts.length;
+
+            // لیست سیگنالها
+            const signalList = document.getElementById('signal-list');
+            signalList.innerHTML = allSignals.slice(0, 20).map(sig => `
+                <div class="signal-item ${sig.signal?.toLowerCase() || ''}">
+                    <div class="signal-header">
+                        <span class="symbol">${sig.symbol || 'N/A'}</span>
+                        <span class="strength ${getStrengthClass(sig.strength)}">${sig.strength || 50}%</span>
+                    </div>
+                    <div class="signal-type">${sig.type || 'SIGNAL'} - ${sig.signal || 'NEUTRAL'}</div>
+                    <div class="reason">${sig.reason || ''}</div>
+                    <div class="timestamp">${formatTime(sig.detected_at || sig.timestamp)}</div>
+                </div>
+            `).join('');
+
+            // پامپ و دامپ
+            const pumpDumpList = document.getElementById('pump-dump-list');
+            pumpDumpList.innerHTML = pumpDumpAlerts.slice(0, 15).map(alert => `
+                <div class="signal-item pump-dump-alert ${alert.signal?.toLowerCase() || ''}">
+                    <div class="signal-header">
+                        <span class="symbol">${alert.symbol}</span>
+                        <span class="strength high">${alert.alert_type || alert.type}</span>
+                    </div>
+                    <div class="reason">${alert.reason || ''}</div>
+                    <div>
+                        <span class="${alert.price_change >= 0 ? 'positive' : 'negative'}">
+                            ${alert.price_change >= 0 ? '+' : ''}${alert.price_change?.toFixed(2) || 0}%
+                        </span>
+                        | حجم: +${alert.volume_change?.toFixed(0) || 0}%
+                    </div>
+                    <div class="timestamp">${formatTime(alert.detected_at || alert.timestamp)}</div>
+                </div>
+            `).join('');
+        }
+
+        function updateMovers(movers) {
+            const gainersList = document.getElementById('gainers-list');
+            gainersList.innerHTML = (movers.gainers || []).slice(0, 10).map(m => `
+                <div class="mover-item">
+                    <span>${m.symbol}</span>
+                    <span class="positive">+${m.change?.toFixed(2)}%</span>
+                </div>
+            `).join('');
+
+            const losersList = document.getElementById('losers-list');
+            losersList.innerHTML = (movers.losers || []).slice(0, 10).map(m => `
+                <div class="mover-item">
+                    <span>${m.symbol}</span>
+                    <span class="negative">${m.change?.toFixed(2)}%</span>
+                </div>
+            `).join('');
+        }
+
+        function getStrengthClass(strength) {
+            if (strength >= 80) return 'high';
+            if (strength >= 60) return 'medium';
+            return 'low';
+        }
+
+        function formatTime(ts) {
+            if (!ts) return '';
+            const date = new Date(ts);
+            return date.toLocaleTimeString('fa-IR');
+        }
+
+        function changeExchange(exchange) {
+            fetch('/api/exchange/change', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({exchange: exchange})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    alert('صرافی تغییر کرد به: ' + exchange);
+                    location.reload();
+                }
+            });
+        }
+
+        // بارگذاری اولیه
+        fetch('/api/signals').then(r => r.json()).then(data => {
+            allSignals = data;
+            updateUI();
+        });
+
+        fetch('/api/pump-dump').then(r => r.json()).then(data => {
+            pumpDumpAlerts = data;
+            updateUI();
+        });
+
+        fetch('/api/movers').then(r => r.json()).then(updateMovers);
+    </script>
+</body>
+</html>
