@@ -1,0 +1,2031 @@
+#!/bin/bash
+# ============================================
+# 🚀 Crypto Futures Signal System - Complete Setup
+# برادر گلم - سیستم کامل سیگنال فیوچرز
+# ============================================
+
+cat << 'BANNER'
+╔═══════════════════════════════════════════════════════════════╗
+║  🚀 CRYPTO FUTURES SIGNAL SYSTEM - V2.0                       ║
+║  📊 250 Futures Pairs | KuCoin | No Sanctions                 ║
+║  🔥 Pump/Dump Detection | Signal Validation | UT Bot Alert   ║
+╚═══════════════════════════════════════════════════════════════╝
+BANNER
+
+# ایجاد پوشه پروژه
+PROJECT_DIR="crypto_futures_pro"
+mkdir -p $PROJECT_DIR/{templates,static/{css,js}}
+cd $PROJECT_DIR
+
+echo "📦 Creating requirements.txt..."
+cat > requirements.txt << 'EOF'
+flask==2.3.3
+flask-socketio==5.3.6
+ccxt==4.1.22
+pandas==2.0.3
+numpy==1.24.3
+ta==0.10.2
+python-socketio==5.9.0
+eventlet==0.33.3
+requests==2.31.0
+aiohttp==3.8.5
+apscheduler==3.10.4
+EOF
+
+echo "📊 Creating database.py..."
+cat > database.py << 'EOF'
+"""
+مدیریت دیتابیس SQLite برای ذخیره سیگنالها و اعتبارسنجی
+"""
+import sqlite3
+from datetime import datetime, timedelta
+import json
+import threading
+
+class SignalDatabase:
+    def __init__(self, db_path='signals.db'):
+        self.db_path = db_path
+        self.lock = threading.Lock()
+        self.init_db()
+    
+    def get_connection(self):
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        return conn
+    
+    def init_db(self):
+        with self.lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            # جدول سیگنالها
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS signals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    signal_type TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    entry_price REAL NOT NULL,
+                    target_price REAL,
+                    stop_loss REAL,
+                    strength INTEGER DEFAULT 50,
+                    reason TEXT,
+                    indicator_data TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT DEFAULT 'ACTIVE',
+                    validated INTEGER DEFAULT 0,
+                    validation_result TEXT,
+                    final_price REAL,
+                    profit_loss REAL,
+                    closed_at TIMESTAMP
+                )
+            ''')
+            
+            # جدول اعتبارسنجی
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS signal_validations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signal_id INTEGER,
+                    check_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    current_price REAL,
+                    price_change_pct REAL,
+                    status TEXT,
+                    notes TEXT,
+                    FOREIGN KEY (signal_id) REFERENCES signals(id)
+                )
+            ''')
+            
+            # جدول پامپ و دامپ
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS pump_dump_alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    alert_type TEXT NOT NULL,
+                    price_at_alert REAL,
+                    volume_change REAL,
+                    price_change REAL,
+                    strength INTEGER,
+                    detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    validated INTEGER DEFAULT 0,
+                    validation_data TEXT,
+                    peak_price REAL,
+                    final_move REAL
+                )
+            ''')
+            
+            # جدول آمار
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS signal_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date DATE UNIQUE,
+                    total_signals INTEGER DEFAULT 0,
+                    successful_signals INTEGER DEFAULT 0,
+                    failed_signals INTEGER DEFAULT 0,
+                    total_profit REAL DEFAULT 0,
+                    win_rate REAL DEFAULT 0
+                )
+            ''')
+            
+            conn.commit()
+            conn.close()
+    
+    def save_signal(self, signal_data):
+        with self.lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO signals 
+                (symbol, signal_type, direction, entry_price, target_price, 
+                 stop_loss, strength, reason, indicator_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                signal_data.get('symbol'),
+                signal_data.get('type', 'UNKNOWN'),
+                signal_data.get('signal', 'NEUTRAL'),
+                signal_data.get('price', 0),
+                signal_data.get('target'),
+                signal_data.get('stop_loss'),
+                signal_data.get('strength', 50),
+                signal_data.get('reason', ''),
+                json.dumps(signal_data.get('indicators', {}))
+            ))
+            
+            signal_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            return signal_id
+    
+    def save_pump_dump(self, alert_data):
+        with self.lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT INTO pump_dump_alerts 
+                (symbol, alert_type, price_at_alert, volume_change, 
+                 price_change, strength)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                alert_data.get('symbol'),
+                alert_data.get('alert_type'),
+                alert_data.get('price', 0),
+                alert_data.get('volume_change', 0),
+                alert_data.get('price_change', 0),
+                alert_data.get('strength', 50)
+            ))
+            
+            alert_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            return alert_id
+    
+    def get_active_signals(self, limit=100):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT * FROM signals 
+            WHERE status = 'ACTIVE'
+            ORDER BY created_at DESC
+            LIMIT ?
+        ''', (limit,))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    
+    def update_signal_validation(self, signal_id, current_price, status, notes=''):
+        with self.lock:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            
+            # دریافت قیمت ورود
+            cursor.execute('SELECT entry_price FROM signals WHERE id = ?', (signal_id,))
+            row = cursor.fetchone()
+            if row:
+                entry_price = row['entry_price']
+                price_change = ((current_price - entry_price) / entry_price) * 100 if entry_price else 0
+                
+                # ثبت اعتبارسنجی
+                cursor.execute('''
+                    INSERT INTO signal_validations 
+                    (signal_id, current_price, price_change_pct, status, notes)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (signal_id, current_price, price_change, status, notes))
+                
+                # بروزرسانی سیگنال اصلی
+                if status in ['SUCCESS', 'FAILED', 'STOPPED']:
+                    cursor.execute('''
+                        UPDATE signals 
+                        SET status = 'CLOSED', validated = 1, 
+                            validation_result = ?, final_price = ?,
+                            profit_loss = ?, closed_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (status, current_price, price_change, signal_id))
+            
+            conn.commit()
+            conn.close()
+    
+    def get_signal_history(self, days=7, limit=500):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        since = datetime.now() - timedelta(days=days)
+        
+        cursor.execute('''
+            SELECT * FROM signals 
+            WHERE created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT ?
+        ''', (since, limit))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    
+    def get_pump_dump_history(self, hours=24):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        since = datetime.now() - timedelta(hours=hours)
+        
+        cursor.execute('''
+            SELECT * FROM pump_dump_alerts 
+            WHERE detected_at >= ?
+            ORDER BY detected_at DESC
+        ''', (since,))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    
+    def get_statistics(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # آمار کلی
+        cursor.execute('''
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN validation_result = 'SUCCESS' THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN validation_result = 'FAILED' THEN 1 ELSE 0 END) as losses,
+                AVG(CASE WHEN validated = 1 THEN profit_loss ELSE NULL END) as avg_profit
+            FROM signals
+            WHERE validated = 1
+        ''')
+        
+        stats = dict(cursor.fetchone())
+        
+        # آمار امروز
+        today = datetime.now().date()
+        cursor.execute('''
+            SELECT COUNT(*) as today_signals
+            FROM signals
+            WHERE DATE(created_at) = ?
+        ''', (today,))
+        
+        stats['today_signals'] = cursor.fetchone()['today_signals']
+        
+        conn.close()
+        return stats
+
+# نمونه گلوبال
+signal_db = SignalDatabase()
+EOF
+
+echo "📈 Creating indicators.py..."
+cat > indicators.py << 'EOF'
+"""
+محاسبه اندیکاتورهای تکنیکال
+MA, EMA, RSI, MACD, Bollinger Bands, ATR, UT Bot Alert
+"""
+import pandas as pd
+import numpy as np
+from ta.trend import EMAIndicator, SMAIndicator, MACD
+from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.volatility import BollingerBands, AverageTrueRange
+
+class TechnicalIndicators:
+    """محاسبه تمام اندیکاتورها"""
+    
+    @staticmethod
+    def calculate_all(df):
+        """محاسبه همه اندیکاتورها"""
+        if len(df) < 50:
+            return df
+        
+        df = df.copy()
+        
+        # Moving Averages
+        df['ma_7'] = SMAIndicator(df['close'], window=7).sma_indicator()
+        df['ma_20'] = SMAIndicator(df['close'], window=20).sma_indicator()
+        df['ma_50'] = SMAIndicator(df['close'], window=50).sma_indicator()
+        df['ma_100'] = SMAIndicator(df['close'], window=100).sma_indicator()
+        df['ma_200'] = SMAIndicator(df['close'], window=200).sma_indicator()
+        
+        # EMA
+        df['ema_9'] = EMAIndicator(df['close'], window=9).ema_indicator()
+        df['ema_12'] = EMAIndicator(df['close'], window=12).ema_indicator()
+        df['ema_21'] = EMAIndicator(df['close'], window=21).ema_indicator()
+        df['ema_26'] = EMAIndicator(df['close'], window=26).ema_indicator()
+        df['ema_50'] = EMAIndicator(df['close'], window=50).ema_indicator()
+        
+        # RSI
+        df['rsi'] = RSIIndicator(df['close'], window=14).rsi()
+        df['rsi_7'] = RSIIndicator(df['close'], window=7).rsi()
+        
+        # MACD
+        macd = MACD(df['close'])
+        df['macd'] = macd.macd()
+        df['macd_signal'] = macd.macd_signal()
+        df['macd_histogram'] = macd.macd_diff()
+        
+        # Bollinger Bands
+        bb = BollingerBands(df['close'], window=20, window_dev=2)
+        df['bb_upper'] = bb.bollinger_hband()
+        df['bb_middle'] = bb.bollinger_mavg()
+        df['bb_lower'] = bb.bollinger_lband()
+        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+        
+        # ATR
+        atr = AverageTrueRange(df['high'], df['low'], df['close'], window=14)
+        df['atr'] = atr.average_true_range()
+        df['atr_percent'] = (df['atr'] / df['close']) * 100
+        
+        # Stochastic
+        stoch = StochasticOscillator(df['high'], df['low'], df['close'])
+        df['stoch_k'] = stoch.stoch()
+        df['stoch_d'] = stoch.stoch_signal()
+        
+        return df
+    
+    @staticmethod
+    def ut_bot_alert(df, sensitivity=1, atr_period=10):
+        """
+        UT Bot Alert - مشابه تریدینگ ویو
+        """
+        if len(df) < atr_period + 10:
+            return df, []
+        
+        df = df.copy()
+        
+        # محاسبه ATR
+        atr = AverageTrueRange(df['high'], df['low'], df['close'], window=atr_period)
+        df['ut_atr'] = atr.average_true_range()
+        df['ut_nLoss'] = sensitivity * df['ut_atr']
+        
+        # محاسبه Trailing Stop
+        df['ut_xATRTrailingStop'] = 0.0
+        
+        for i in range(1, len(df)):
+            nLoss = df['ut_nLoss'].iloc[i]
+            prev_stop = df['ut_xATRTrailingStop'].iloc[i-1]
+            close = df['close'].iloc[i]
+            prev_close = df['close'].iloc[i-1]
+            
+            if close > prev_stop and prev_close > prev_stop:
+                df.loc[df.index[i], 'ut_xATRTrailingStop'] = max(prev_stop, close - nLoss)
+            elif close < prev_stop and prev_close < prev_stop:
+                df.loc[df.index[i], 'ut_xATRTrailingStop'] = min(prev_stop, close + nLoss)
+            elif close > prev_stop:
+                df.loc[df.index[i], 'ut_xATRTrailingStop'] = close - nLoss
+            else:
+                df.loc[df.index[i], 'ut_xATRTrailingStop'] = close + nLoss
+        
+        # تشخیص سیگنال
+        df['ut_pos'] = 0
+        df.loc[df['close'] > df['ut_xATRTrailingStop'], 'ut_pos'] = 1
+        df.loc[df['close'] < df['ut_xATRTrailingStop'], 'ut_pos'] = -1
+        
+        # سیگنالهای ورود
+        df['ut_signal'] = df['ut_pos'].diff()
+        
+        alerts = []
+        for i in range(1, len(df)):
+            if df['ut_signal'].iloc[i] == 2:  # Buy
+                alerts.append({
+                    'index': i,
+                    'type': 'UT_BOT_BUY',
+                    'signal': 'BUY',
+                    'price': df['close'].iloc[i],
+                    'stop': df['ut_xATRTrailingStop'].iloc[i],
+                    'strength': 80,
+                    'reason': f'📈 UT Bot Buy Signal (Stop: {df["ut_xATRTrailingStop"].iloc[i]:.4f})'
+                })
+            elif df['ut_signal'].iloc[i] == -2:  # Sell
+                alerts.append({
+                    'index': i,
+                    'type': 'UT_BOT_SELL',
+                    'signal': 'SELL',
+                    'price': df['close'].iloc[i],
+                    'stop': df['ut_xATRTrailingStop'].iloc[i],
+                    'strength': 80,
+                    'reason': f'📉 UT Bot Sell Signal (Stop: {df["ut_xATRTrailingStop"].iloc[i]:.4f})'
+                })
+        
+        return df, alerts[-5:] if alerts else []
+    
+    @staticmethod
+    def detect_ma_ema_cross(df):
+        """تشخیص تقاطع MA و EMA"""
+        if len(df) < 55:
+            return []
+        
+        df = df.copy()
+        
+        if 'ema_9' not in df.columns:
+            df = TechnicalIndicators.calculate_all(df)
+        
+        crosses = []
+        
+        # EMA 9/21 Cross
+        for i in range(1, len(df)):
+            # Golden Cross EMA
+            if (df['ema_9'].iloc[i] > df['ema_21'].iloc[i] and 
+                df['ema_9'].iloc[i-1] <= df['ema_21'].iloc[i-1]):
+                crosses.append({
+                    'index': i,
+                    'type': 'EMA_GOLDEN_CROSS',
+                    'signal': 'BUY',
+                    'strength': 75,
+                    'price': df['close'].iloc[i],
+                    'reason': '🔀 EMA 9/21 Golden Cross (BUY)'
+                })
+            
+            # Death Cross EMA
+            elif (df['ema_9'].iloc[i] < df['ema_21'].iloc[i] and 
+                  df['ema_9'].iloc[i-1] >= df['ema_21'].iloc[i-1]):
+                crosses.append({
+                    'index': i,
+                    'type': 'EMA_DEATH_CROSS',
+                    'signal': 'SELL',
+                    'strength': 75,
+                    'price': df['close'].iloc[i],
+                    'reason': '🔀 EMA 9/21 Death Cross (SELL)'
+                })
+            
+            # MA 20/50 Cross
+            if pd.notna(df['ma_50'].iloc[i]) and pd.notna(df['ma_50'].iloc[i-1]):
+                if (df['ma_20'].iloc[i] > df['ma_50'].iloc[i] and 
+                    df['ma_20'].iloc[i-1] <= df['ma_50'].iloc[i-1]):
+                    crosses.append({
+                        'index': i,
+                        'type': 'MA_GOLDEN_CROSS',
+                        'signal': 'BUY',
+                        'strength': 85,
+                        'price': df['close'].iloc[i],
+                        'reason': '🌟 MA 20/50 Golden Cross (Strong BUY)'
+                    })
+                
+                elif (df['ma_20'].iloc[i] < df['ma_50'].iloc[i] and 
+                      df['ma_20'].iloc[i-1] >= df['ma_50'].iloc[i-1]):
+                    crosses.append({
+                        'index': i,
+                        'type': 'MA_DEATH_CROSS',
+                        'signal': 'SELL',
+                        'strength': 85,
+                        'price': df['close'].iloc[i],
+                        'reason': '💀 MA 20/50 Death Cross (Strong SELL)'
+                    })
+        
+        return crosses[-10:] if crosses else []
+    
+    @staticmethod
+    def get_indicator_summary(df):
+        """خلاصه وضعیت اندیکاتورها"""
+        if len(df) < 50:
+            return {}
+        
+        df = TechnicalIndicators.calculate_all(df)
+        latest = df.iloc[-1]
+        
+        summary = {
+            'price': latest['close'],
+            'rsi': round(latest['rsi'], 2) if pd.notna(latest['rsi']) else None,
+            'macd': round(latest['macd'], 6) if pd.notna(latest['macd']) else None,
+            'macd_signal': round(latest['macd_signal'], 6) if pd.notna(latest['macd_signal']) else None,
+            'bb_position': None,
+            'ma_trend': None,
+            'atr_percent': round(latest['atr_percent'], 2) if pd.notna(latest['atr_percent']) else None
+        }
+        
+        # موقعیت در بولینگر
+        if pd.notna(latest['bb_upper']) and pd.notna(latest['bb_lower']):
+            bb_range = latest['bb_upper'] - latest['bb_lower']
+            if bb_range > 0:
+                bb_pos = (latest['close'] - latest['bb_lower']) / bb_range * 100
+                summary['bb_position'] = round(bb_pos, 1)
+        
+        # ترند MA
+        if pd.notna(latest['ma_20']) and pd.notna(latest['ma_50']):
+            if latest['close'] > latest['ma_20'] > latest['ma_50']:
+                summary['ma_trend'] = 'BULLISH'
+            elif latest['close'] < latest['ma_20'] < latest['ma_50']:
+                summary['ma_trend'] = 'BEARISH'
+            else:
+                summary['ma_trend'] = 'NEUTRAL'
+        
+        return summary
+
+indicators = TechnicalIndicators()
+EOF
+
+echo "🔥 Creating signals.py..."
+cat > signals.py << 'EOF'
+"""
+🔥 سیستم سیگنالدهی پیشرفته
+Smart Money, Order Blocks, Liquidity Hunt, Divergence, Whale Detection
+"""
+import pandas as pd
+import numpy as np
+from datetime import datetime
+from ta.trend import EMAIndicator
+from ta.momentum import RSIIndicator
+from ta.volatility import AverageTrueRange
+from indicators import TechnicalIndicators
+
+class AdvancedSignalEngine:
+    """موتور سیگنالدهی پیشرفته"""
+    
+    @staticmethod
+    def detect_smart_money(df, volume_threshold=2.0):
+        """تشخیص ورود و خروج پول هوشمند"""
+        if len(df) < 30:
+            return []
+        
+        df = df.copy()
+        df['volume_sma'] = df['volume'].rolling(20).mean()
+        df['volume_ratio'] = df['volume'] / df['volume_sma']
+        df['price_change'] = df['close'].pct_change() * 100
+        
+        signals = []
+        
+        for i in range(20, len(df)):
+            vol_ratio = df['volume_ratio'].iloc[i]
+            price_change = abs(df['price_change'].iloc[i])
+            
+            if pd.isna(vol_ratio):
+                continue
+            
+            if vol_ratio > volume_threshold and price_change < 0.5:
+                signals.append({
+                    'index': i,
+                    'type': 'SMART_MONEY_ACCUMULATION',
+                    'signal': 'BUY',
+                    'strength': min(int(vol_ratio * 30), 95),
+                    'reason': f'💰 Smart Money Accumulation (Vol: {vol_ratio:.1f}x)',
+                    'price': df['close'].iloc[i],
+                    'timestamp': df['timestamp'].iloc[i] if 'timestamp' in df.columns else datetime.utcnow()
+                })
+            
+            elif vol_ratio > volume_threshold and price_change > 2:
+                if df['close'].iloc[i] > df['close'].iloc[i-1]:
+                    signals.append({
+                        'index': i,
+                        'type': 'SMART_MONEY_DISTRIBUTION',
+                        'signal': 'SELL',
+                        'strength': min(int(vol_ratio * 25), 90),
+                        'reason': f'💰 Smart Money Distribution (Vol: {vol_ratio:.1f}x)',
+                        'price': df['close'].iloc[i],
+                        'timestamp': df['timestamp'].iloc[i] if 'timestamp' in df.columns else datetime.utcnow()
+                    })
+        
+        return signals[-5:] if signals else []
+    
+    @staticmethod
+    def find_order_blocks(df):
+        """یافتن Order Blocks"""
+        if len(df) < 10:
+            return []
+        
+        df = df.copy()
+        order_blocks = []
+        
+        for i in range(3, len(df) - 1):
+            try:
+                if (df['close'].iloc[i-1] < df['open'].iloc[i-1] and
+                    df['close'].iloc[i] > df['open'].iloc[i] and
+                    df['close'].iloc[i] > df['high'].iloc[i-1]):
+                    
+                    move = ((df['close'].iloc[i] - df['low'].iloc[i-1]) / df['low'].iloc[i-1]) * 100
+                    
+                    if move > 0.5:
+                        order_blocks.append({
+                            'index': i,
+                            'type': 'BULLISH_ORDER_BLOCK',
+                            'signal': 'BUY',
+                            'strength': min(int(move * 20), 90),
+                            'price': df['close'].iloc[i],
+                            'reason': f'📦 Bullish Order Block ({move:.1f}% move)',
+                            'timestamp': df['timestamp'].iloc[i] if 'timestamp' in df.columns else datetime.utcnow()
+                        })
+                
+                if (df['close'].iloc[i-1] > df['open'].iloc[i-1] and
+                    df['close'].iloc[i] < df['open'].iloc[i] and
+                    df['close'].iloc[i] < df['low'].iloc[i-1]):
+                    
+                    move = ((df['high'].iloc[i-1] - df['close'].iloc[i]) / df['high'].iloc[i-1]) * 100
+                    
+                    if move > 0.5:
+                        order_blocks.append({
+                            'index': i,
+                            'type': 'BEARISH_ORDER_BLOCK',
+                            'signal': 'SELL',
+                            'strength': min(int(move * 20), 90),
+                            'price': df['close'].iloc[i],
+                            'reason': f'📦 Bearish Order Block ({move:.1f}% move)',
+                            'timestamp': df['timestamp'].iloc[i] if 'timestamp' in df.columns else datetime.utcnow()
+                        })
+            except:
+                continue
+        
+        return order_blocks[-5:] if order_blocks else []
+    
+    @staticmethod
+    def detect_liquidity_hunt(df, lookback=20):
+        """تشخیص شکار نقدینگی"""
+        if len(df) < lookback + 5:
+            return []
+        
+        df = df.copy()
+        signals = []
+        
+        for i in range(lookback, len(df)):
+            try:
+                window = df.iloc[i-lookback:i]
+                current = df.iloc[i]
+                
+                prev_high = window['high'].max()
+                prev_low = window['low'].min()
+                
+                if (current['low'] < prev_low and 
+                    current['close'] > prev_low and
+                    current['close'] > current['open']):
+                    
+                    hunt = ((prev_low - current['low']) / prev_low) * 100
+                    
+                    signals.append({
+                        'index': i,
+                        'type': 'LIQUIDITY_GRAB_LOW',
+                        'signal': 'BUY',
+                        'strength': min(75 + int(hunt * 10), 95),
+                        'price': current['close'],
+                        'stop_loss': current['low'] * 0.995,
+                        'reason': f'🎯 Liquidity Hunt Below Support ({hunt:.2f}%)',
+                        'timestamp': df['timestamp'].iloc[i] if 'timestamp' in df.columns else datetime.utcnow()
+                    })
+                
+                if (current['high'] > prev_high and 
+                    current['close'] < prev_high and
+                    current['close'] < current['open']):
+                    
+                    hunt = ((current['high'] - prev_high) / prev_high) * 100
+                    
+                    signals.append({
+                        'index': i,
+                        'type': 'LIQUIDITY_GRAB_HIGH',
+                        'signal': 'SELL',
+                        'strength': min(75 + int(hunt * 10), 95),
+                        'price': current['close'],
+                        'stop_loss': current['high'] * 1.005,
+                        'reason': f'🎯 Liquidity Hunt Above Resistance ({hunt:.2f}%)',
+                        'timestamp': df['timestamp'].iloc[i] if 'timestamp' in df.columns else datetime.utcnow()
+                    })
+            except:
+                continue
+        
+        return signals[-5:] if signals else []
+    
+    @staticmethod
+    def find_divergences(df):
+        """یافتن واگراییها"""
+        if len(df) < 30:
+            return []
+        
+        df = df.copy()
+        df['rsi'] = RSIIndicator(df['close'], window=14).rsi()
+        
+        divergences = []
+        lookback = 5
+        
+        for i in range(lookback * 2, len(df)):
+            try:
+                if (df['close'].iloc[i] < df['close'].iloc[i-lookback] and
+                    df['rsi'].iloc[i] > df['rsi'].iloc[i-lookback] and
+                    df['rsi'].iloc[i] < 40):
+                    
+                    divergences.append({
+                        'index': i,
+                        'type': 'BULLISH_DIVERGENCE',
+                        'signal': 'BUY',
+                        'strength': 85,
+                        'price': df['close'].iloc[i],
+                        'reason': f'📈 RSI Bullish Divergence (RSI: {df["rsi"].iloc[i]:.1f})',
+                        'timestamp': df['timestamp'].iloc[i] if 'timestamp' in df.columns else datetime.utcnow()
+                    })
+                
+                if (df['close'].iloc[i] > df['close'].iloc[i-lookback] and
+                    df['rsi'].iloc[i] < df['rsi'].iloc[i-lookback] and
+                    df['rsi'].iloc[i] > 60):
+                    
+                    divergences.append({
+                        'index': i,
+                        'type': 'BEARISH_DIVERGENCE',
+                        'signal': 'SELL',
+                        'strength': 85,
+                        'price': df['close'].iloc[i],
+                        'reason': f'📉 RSI Bearish Divergence (RSI: {df["rsi"].iloc[i]:.1f})',
+                        'timestamp': df['timestamp'].iloc[i] if 'timestamp' in df.columns else datetime.utcnow()
+                    })
+            except:
+                continue
+        
+        return divergences[-5:] if divergences else []
+    
+        @staticmethod
+        def detect_whale_activity(df, std_multiplier=2.5):
+            """تشخیص فعالیت نهنگها"""
+            if len(df) < 60:
+                return []
+            
+            df = df.copy()
+            df['volume_mean'] = df['volume'].rolling(50).mean()
+            df['volume_std'] = df['volume'].rolling(50).std()
+            
+            signals = []
+            
+            for i in range(50, len(df)):
+                try:
+                    if df['volume_std'].iloc[i] == 0 or pd.isna(df['volume_std'].iloc[i]):
+                        continue
+                    
+                    zscore = (df['volume'].iloc[i] - df['volume_mean'].iloc[i]) / df['volume_std'].iloc[i]
+                    
+                    if zscore > std_multiplier:
+                        price_change = ((df['close'].iloc[i] - df['open'].iloc[i]) / df['open'].iloc[i]) * 100
+                        
+                        if price_change > 0.3:
+                            signals.append({
+                                'index': i,
+                                'type': 'WHALE_BUYING',
+                                'signal': 'BUY',
+                                'strength': min(65 + int(zscore * 8), 95),
+                                'price': df['close'].iloc[i],
+                                'reason': f'🐋 Whale Buying (Vol Z: {zscore:.1f})',
+                                'timestamp': df['timestamp'].iloc[i] if 'timestamp' in df.columns else datetime.utcnow()
+                            })
+                        elif price_change < -0.3:
+                            signals.append({
+                                'index': i,
+                                'type': 'WHALE_SELLING',
+                                'signal': 'SELL',
+                                'strength': min(65 + int(zscore * 8), 95),
+                                'price': df['close'].iloc[i],
+                                'reason': f'🐋 Whale Selling (Vol Z: {zscore:.1f})',
+                                'timestamp': df['timestamp'].iloc[i] if 'timestamp' in df.columns else datetime.utcnow()
+                            })
+                except:
+                    continue
+            
+            return signals[-5:] if signals else []
+    
+    
+    class PumpDumpDetector:
+        """تشخیص پامپ و دامپ"""
+        
+        @staticmethod
+        def detect_pump(df, symbol, threshold=5, window=15):
+            """تشخیص پامپ"""
+            if len(df) < window + 50:
+                return []
+            
+            alerts = []
+            
+            try:
+                recent = df.tail(window)
+                start_price = recent['close'].iloc[0]
+                end_price = recent['close'].iloc[-1]
+                price_change = ((end_price - start_price) / start_price) * 100
+                
+                avg_volume = df['volume'].tail(100).mean()
+                recent_volume = recent['volume'].mean()
+                volume_change = ((recent_volume - avg_volume) / avg_volume) * 100 if avg_volume > 0 else 0
+                
+                if price_change >= threshold and volume_change > 30:
+                    alerts.append({
+                        'symbol': symbol,
+                        'alert_type': 'PUMP',
+                        'signal': 'BUY',
+                        'price': end_price,
+                        'price_change': round(price_change, 2),
+                        'volume_change': round(volume_change, 2),
+                        'strength': min(70 + int(price_change * 2), 95),
+                        'reason': f'🚀 PUMP! +{price_change:.1f}% | Vol +{volume_change:.0f}%',
+                        'timestamp': datetime.utcnow()
+                    })
+            except:
+                pass
+            
+            return alerts
+    
+    @staticmethod
+    def detect_dump(df, symbol, threshold=5, window=15):
+        """تشخیص دامپ"""
+        if len(df) < window + 50:
+            return []
+        
+        alerts = []
+        
+        try:
+            recent = df.tail(window)
+            start_price = recent['close'].iloc[0]
+            end_price = recent['close'].iloc[-1]
+            price_change = ((end_price - start_price) / start_price) * 100
+            
+            avg_volume = df['volume'].tail(100).mean()
+            recent_volume = recent['volume'].mean()
+            volume_change = ((recent_volume - avg_volume) / avg_volume) * 100 if avg_volume > 0 else 0
+            
+            if price_change <= -threshold and volume_change > 30:
+                alerts.append({
+                    'symbol': symbol,
+                    'alert_type': 'DUMP',
+                    'signal': 'SELL',
+                    'price': end_price,
+                    'price_change': round(price_change, 2),
+                    'volume_change': round(volume_change, 2),
+                    'strength': min(70 + int(abs(price_change) * 2), 95),
+                    'reason': f'📉 DUMP! {price_change:.1f}% | Vol +{volume_change:.0f}%',
+                    'timestamp': datetime.utcnow()
+                })
+        except:
+            pass
+        
+        return alerts
+
+
+class UltimateSignalGenerator:
+    """ترکیب همه روشها"""
+    
+    def __init__(self):
+        self.engine = AdvancedSignalEngine()
+        self.pump_dump = PumpDumpDetector()
+        self.indicators = TechnicalIndicators()
+    
+    def analyze(self, df, symbol):
+        """تحلیل کامل"""
+        all_signals = []
+        
+        try:
+            # سیگنالهای پیشرفته
+            smart_money = self.engine.detect_smart_money(df)
+            order_blocks = self.engine.find_order_blocks(df)
+            liquidity = self.engine.detect_liquidity_hunt(df)
+            divergence = self.engine.find_divergences(df)
+            whale = self.engine.detect_whale_activity(df)
+            
+            # UT Bot
+            _, ut_alerts = self.indicators.ut_bot_alert(df)
+            
+            # MA/EMA Cross
+            ma_crosses = self.indicators.detect_ma_ema_cross(df)
+            
+            # پامپ و دامپ
+            pump = self.pump_dump.detect_pump(df, symbol)
+            dump = self.pump_dump.detect_dump(df, symbol)
+            
+            for sig_list in [smart_money, order_blocks, liquidity, divergence, whale, ut_alerts, ma_crosses]:
+                for sig in sig_list:
+                    sig['symbol'] = symbol
+                    all_signals.append(sig)
+            
+            all_signals.extend(pump)
+            all_signals.extend(dump)
+            
+        except Exception as e:
+            print(f"Error analyzing {symbol}: {e}")
+        
+        return all_signals
+    
+    def get_best_signals(self, df, symbol, top_n=5):
+        """بهترین سیگنالها"""
+        signals = self.analyze(df, symbol)
+        signals.sort(key=lambda x: x.get('strength', 0), reverse=True)
+        return signals[:top_n]
+
+signal_generator = UltimateSignalGenerator()
+EOF
+
+echo "📥 Creating data_fetcher.py..."
+cat > data_fetcher.py << 'EOF'
+"""
+دریافت داده از صرافیهای بدون تحریم
+KuCoin, Bybit, OKX, Gate.io, MEXC
+"""
+import ccxt
+import pandas as pd
+from datetime import datetime
+import time
+import asyncio
+
+class ExchangeManager:
+    """مدیریت صرافیها"""
+    
+    SUPPORTED_EXCHANGES = {
+        'kucoin': {
+            'name': 'KuCoin',
+            'class': ccxt.kucoinfutures,
+            'sanctioned': False
+        },
+        'bybit': {
+            'name': 'Bybit',
+            'class': ccxt.bybit,
+            'sanctioned': False
+        },
+        'okx': {
+            'name': 'OKX',
+            'class': ccxt.okx,
+            'sanctioned': False
+        },
+        'gate': {
+            'name': 'Gate.io',
+            'class': ccxt.gateio,
+            'sanctioned': False
+        },
+        'mexc': {
+            'name': 'MEXC',
+            'class': ccxt.mexc,
+            'sanctioned': False
+        },
+        'bitget': {
+            'name': 'Bitget',
+            'class': ccxt.bitget,
+            'sanctioned': False
+        }
+    }
+    
+    def __init__(self, exchange_id='kucoin'):
+        self.exchange_id = exchange_id
+        self.exchange = None
+        self.symbols = []
+        self.init_exchange()
+    
+    def init_exchange(self):
+        """راهاندازی صرافی"""
+        if self.exchange_id not in self.SUPPORTED_EXCHANGES:
+            self.exchange_id = 'kucoin'
+        
+        try:
+            exchange_info = self.SUPPORTED_EXCHANGES[self.exchange_id]
+            self.exchange = exchange_info['class']({
+                'enableRateLimit': True,
+                'options': {'defaultType': 'swap'}
+            })
+            print(f"✅ Connected to {exchange_info['name']}")
+        except Exception as e:
+            print(f"❌ Error connecting: {e}")
+            # Fallback to KuCoin
+            self.exchange = ccxt.kucoinfutures({'enableRateLimit': True})
+    
+    def change_exchange(self, new_exchange_id):
+        """تغییر صرافی"""
+        if new_exchange_id in self.SUPPORTED_EXCHANGES:
+            self.exchange_id = new_exchange_id
+            self.init_exchange()
+            self.load_symbols()
+            return True
+        return False
+    
+    def load_symbols(self, limit=250):
+        """بارگذاری لیست ارزها"""
+        try:
+            self.exchange.load_markets()
+            
+            futures_symbols = []
+            for symbol, market in self.exchange.markets.items():
+                if market.get('swap') or market.get('future'):
+                    if market.get('active', True):
+                        futures_symbols.append(symbol)
+            
+            # مرتبسازی و محدود کردن
+            self.symbols = futures_symbols[:limit]
+            print(f"📊 Loaded {len(self.symbols)} futures symbols from {self.exchange_id}")
+            return self.symbols
+        except Exception as e:
+            print(f"❌ Error loading symbols: {e}")
+            self.symbols = ['BTC/USDT:USDT', 'ETH/USDT:USDT']
+            return self.symbols
+    
+    def fetch_ohlcv(self, symbol, timeframe='15m', limit=200):
+        """دریافت کندلها"""
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df['symbol'] = symbol
+            
+            return df
+        except Exception as e:
+            print(f"❌ Error fetching {symbol}: {e}")
+            return pd.DataFrame()
+    
+    def get_ticker(self, symbol):
+        """دریافت قیمت لحظهای"""
+        try:
+            ticker = self.exchange.fetch_ticker(symbol)
+            return {
+                'symbol': symbol,
+                'price': ticker.get('last', 0),
+                'change_24h': ticker.get('percentage', 0),
+                'volume_24h': ticker.get('quoteVolume', 0),
+                'high_24h': ticker.get('high', 0),
+                'low_24h': ticker.get('low', 0)
+            }
+        except:
+            return None
+    
+    def get_all_tickers(self):
+        """دریافت همه قیمتها"""
+        try:
+            tickers = self.exchange.fetch_tickers()
+            return tickers
+        except:
+            return {}
+    
+    def get_top_movers(self, limit=20):
+        """برترین تغییرات قیمت"""
+        try:
+            tickers = self.get_all_tickers()
+            
+            movers = []
+            for symbol, data in tickers.items():
+                if data.get('percentage') is not None:
+                    movers.append({
+                        'symbol': symbol,
+                        'price': data.get('last', 0),
+                        'change': data.get('percentage', 0),
+                        'volume': data.get('quoteVolume', 0)
+                    })
+            
+            # مرتب سازی بر اساس تغییرات
+            gainers = sorted(movers, key=lambda x: x['change'], reverse=True)[:limit]
+            losers = sorted(movers, key=lambda x: x['change'])[:limit]
+            
+            return {'gainers': gainers, 'losers': losers}
+        except Exception as e:
+            print(f"Error getting movers: {e}")
+            return {'gainers': [], 'losers': []}
+
+# نمونه گلوبال
+exchange_manager = ExchangeManager('kucoin')
+EOF
+
+echo "✅ Creating signal_validator.py..."
+cat > signal_validator.py << 'EOF'
+"""
+اعتبارسنجی سیگنالها هر 3 دقیقه
+"""
+from datetime import datetime, timedelta
+from database import signal_db
+from data_fetcher import exchange_manager
+import threading
+import time
+
+class SignalValidator:
+    """اعتبارسنجی سیگنالها"""
+    
+    def __init__(self, check_interval=180):  # 3 دقیقه
+        self.check_interval = check_interval
+        self.running = False
+        self.thread = None
+    
+    def validate_signal(self, signal):
+        """اعتبارسنجی یک سیگنال"""
+        try:
+            symbol = signal['symbol']
+            entry_price = signal['entry_price']
+            direction = signal['direction']
+            target = signal.get('target_price')
+            stop_loss = signal.get('stop_loss')
+            
+            # دریافت قیمت فعلی
+            ticker = exchange_manager.get_ticker(symbol)
+            if not ticker:
+                return None
+            
+            current_price = ticker['price']
+            
+            # محاسبه تغییر قیمت
+            if direction == 'BUY':
+                change_pct = ((current_price - entry_price) / entry_price) * 100
+            else:
+                change_pct = ((entry_price - current_price) / entry_price) * 100
+            
+            # تعیین وضعیت
+            status = 'ACTIVE'
+            notes = f"Price: {current_price:.6f} | Change: {change_pct:+.2f}%"
+            
+            if target and direction == 'BUY' and current_price >= target:
+                status = 'SUCCESS'
+                notes = f"🎯 Target reached! +{change_pct:.2f}%"
+            elif target and direction == 'SELL' and current_price <= target:
+                status = 'SUCCESS'
+                notes = f"🎯 Target reached! +{change_pct:.2f}%"
+            elif stop_loss and direction == 'BUY' and current_price <= stop_loss:
+                status = 'STOPPED'
+                notes = f"🛑 Stop loss hit! {change_pct:.2f}%"
+            elif stop_loss and direction == 'SELL' and current_price >= stop_loss:
+                status = 'STOPPED'
+                notes = f"🛑 Stop loss hit! {change_pct:.2f}%"
+            elif change_pct >= 5:
+                status = 'SUCCESS'
+                notes = f"✅ +5% profit! {change_pct:.2f}%"
+            elif change_pct <= -5:
+                status = 'FAILED'
+                notes = f"❌ -5% loss! {change_pct:.2f}%"
+            
+            # ذخیره نتیجه
+            signal_db.update_signal_validation(
+                signal['id'],
+                current_price,
+                status,
+                notes
+            )
+            
+            return {
+                'signal_id': signal['id'],
+                'symbol': symbol,
+                'current_price': current_price,
+                'change_pct': change_pct,
+                'status': status,
+                'notes': notes
+            }
+            
+        except Exception as e:
+            print(f"Error validating signal: {e}")
+            return None
+    
+    def validate_all_active(self):
+        """اعتبارسنجی همه سیگنالهای فعال"""
+        active_signals = signal_db.get_active_signals()
+        results = []
+        
+        for signal in active_signals:
+            result = self.validate_signal(signal)
+            if result:
+                results.append(result)
+            time.sleep(0.2)  # Rate limiting
+        
+        return results
+    
+    def run_validation_loop(self):
+        """حلقه اعتبارسنجی"""
+        while self.running:
+            try:
+                print(f"\n🔍 Validating signals at {datetime.now()}")
+                results = self.validate_all_active()
+                
+                success = len([r for r in results if r['status'] == 'SUCCESS'])
+                failed = len([r for r in results if r['status'] in ['FAILED', 'STOPPED']])
+                
+                print(f"✅ Validated {len(results)} signals | Success: {success} | Failed: {failed}")
+                
+            except Exception as e:
+                print(f"Validation error: {e}")
+            
+            time.sleep(self.check_interval)
+    
+    def start(self):
+        """شروع اعتبارسنجی"""
+        if not self.running:
+            self.running = True
+            self.thread = threading.Thread(target=self.run_validation_loop, daemon=True)
+            self.thread.start()
+            print("🔄 Signal validator started (every 3 minutes)")
+    
+    def stop(self):
+        """توقف"""
+        self.running = False
+
+validator = SignalValidator()
+EOF
+
+echo "🌐 Creating app.py..."
+cat > app.py << 'EOF'
+"""
+🚀 سرور اصلی Flask
+"""
+from flask import Flask, render_template, jsonify, request
+from flask_socketio import SocketIO, emit
+from datetime import datetime, timedelta
+import threading
+import time
+import json
+
+from database import signal_db
+from data_fetcher import exchange_manager
+from signals import signal_generator
+from indicators import TechnicalIndicators
+from signal_validator import validator
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'crypto_futures_secret_2024'
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# ذخیره داده ها
+cache = {
+    'signals': [],
+    'pump_dump': [],
+    'movers': {'gainers': [], 'losers': []},
+    'last_update': None
+}
+
+def scan_all_symbols():
+    """اسکن همه ارزها"""
+    global cache
+    
+    while True:
+        try:
+            all_signals = []
+            pump_dump_alerts = []
+            
+            symbols = exchange_manager.symbols[:100]  # 100 تا اول
+            
+            for i, symbol in enumerate(symbols):
+                try:
+                    df = exchange_manager.fetch_ohlcv(symbol, '15m', 200)
+                    if df.empty:
+                        continue
+                    
+                    # تولید سیگنال
+                    signals = signal_generator.get_best_signals(df, symbol, 3)
+                    
+                    for sig in signals:
+                        sig['detected_at'] = datetime.utcnow().isoformat()
+                        all_signals.append(sig)
+                        
+                        # ذخیره در دیتابیس
+                        signal_db.save_signal(sig)
+                        
+                        # پامپ و دامپ
+                        if 'PUMP' in sig.get('type', '') or 'DUMP' in sig.get('type', ''):
+                            pump_dump_alerts.append(sig)
+                            signal_db.save_pump_dump(sig)
+                    
+                    # ارسال به کلاینت
+                    if signals:
+                        socketio.emit('new_signals', signals)
+                    
+                    time.sleep(0.3)
+                    
+                except Exception as e:
+                    continue
+            
+            # بروزرسانی کش
+            cache['signals'] = all_signals[-100:]
+            cache['pump_dump'] = pump_dump_alerts[-50:]
+            cache['movers'] = exchange_manager.get_top_movers(20)
+            cache['last_update'] = datetime.utcnow().isoformat()
+            
+            # ارسال بروزرسانی
+            socketio.emit('cache_update', cache)
+            
+            print(f"✅ Scan complete: {len(all_signals)} signals found")
+            
+            time.sleep(60)  # هر 1 دقیقه
+            
+        except Exception as e:
+            print(f"Scan error: {e}")
+            time.sleep(30)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/analytics')
+def analytics():
+    return render_template('analytics.html')
+
+@app.route('/api/signals')
+def get_signals():
+    return jsonify(cache['signals'][-50:])
+
+@app.route('/api/signals/history')
+def get_signal_history():
+    days = request.args.get('days', 7, type=int)
+    signals = signal_db.get_signal_history(days)
+    return jsonify(signals)
+
+@app.route('/api/pump-dump')
+def get_pump_dump():
+    return jsonify(cache['pump_dump'])
+
+@app.route('/api/pump-dump/history')
+def get_pump_dump_history():
+    hours = request.args.get('hours', 24, type=int)
+    alerts = signal_db.get_pump_dump_history(hours)
+    return jsonify(alerts)
+
+@app.route('/api/movers')
+def get_movers():
+    return jsonify(cache['movers'])
+
+@app.route('/api/stats')
+def get_stats():
+    stats = signal_db.get_statistics()
+    return jsonify(stats)
+
+@app.route('/api/exchange/change', methods=['POST'])
+def change_exchange():
+    data = request.json
+    new_exchange = data.get('exchange', 'kucoin')
+    
+    success = exchange_manager.change_exchange(new_exchange)
+    if success:
+        exchange_manager.load_symbols()
+        return jsonify({'success': True, 'exchange': new_exchange})
+    return jsonify({'success': False})
+
+@app.route('/api/exchanges')
+def get_exchanges():
+    return jsonify({
+        'current': exchange_manager.exchange_id,
+        'available': list(exchange_manager.SUPPORTED_EXCHANGES.keys())
+    })
+
+@app.route('/api/symbols')
+def get_symbols():
+    return jsonify({
+        'count': len(exchange_manager.symbols),
+        'symbols': exchange_manager.symbols[:50]
+    })
+
+@app.route('/api/analyze/<symbol>')
+def analyze_symbol(symbol):
+    try:
+        symbol = symbol.replace('_', '/')
+        df = exchange_manager.fetch_ohlcv(symbol, '15m', 200)
+        
+        if df.empty:
+            return jsonify({'error': 'No data'})
+        
+        signals = signal_generator.analyze(df, symbol)
+        indicators = TechnicalIndicators.get_indicator_summary(df)
+        
+        return jsonify({
+            'symbol': symbol,
+            'signals': signals,
+            'indicators': indicators,
+            'timestamp': datetime.utcnow().isoformat()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+@socketio.on('connect')
+def handle_connect():
+    emit('connected', {'status': 'ok', 'exchange': exchange_manager.exchange_id})
+
+@socketio.on('subscribe')
+def handle_subscribe(data):
+    symbol = data.get('symbol')
+    if symbol:
+        emit('subscribed', {'symbol': symbol})
+
+if __name__ == '__main__':
+    print("🚀 Starting Crypto Futures Signal System...")
+    
+    # بارگذاری ارزها
+    exchange_manager.load_symbols(250)
+    
+    # شروع اعتبارسنجی
+    validator.start()
+    
+    # شروع اسکنر
+    scanner_thread = threading.Thread(target=scan_all_symbols, daemon=True)
+    scanner_thread.start()
+    
+    print("📊 Server running on http://localhost:5000")
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+EOF
+
+echo "🎨 Creating templates/index.html..."
+cat > templates/index.html << 'EOF'
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🚀 Crypto Futures Signal System</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Vazirmatn', sans-serif;
+            background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 100%);
+            color: #fff;
+            min-height: 100vh;
+        }
+        .header {
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 4px 20px rgba(102, 126, 234, 0.4);
+        }
+        .header h1 { font-size: 2em; margin-bottom: 10px; }
+        .exchange-selector {
+            background: rgba(255,255,255,0.1);
+            padding: 10px 20px;
+            border-radius: 25px;
+            display: inline-block;
+            margin-top: 10px;
+        }
+        .exchange-selector select {
+            background: transparent;
+            border: none;
+            color: white;
+            font-size: 1.1em;
+            cursor: pointer;
+        }
+        .container { max-width: 1600px; margin: 0 auto; padding: 20px; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; }
+        .card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 15px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .card h2 {
+            font-size: 1.3em;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .signal-item {
+            background: rgba(255,255,255,0.05);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-right: 4px solid #667eea;
+            transition: transform 0.2s;
+        }
+        .signal-item:hover { transform: translateX(-5px); }
+        .signal-item.buy { border-right-color: #00ff88; }
+        .signal-item.sell { border-right-color: #ff4757; }
+        .signal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .symbol { font-weight: bold; font-size: 1.1em; }
+        .strength {
+            padding: 3px 10px;
+            border-radius: 15px;
+            font-size: 0.9em;
+        }
+        .strength.high { background: #00ff88; color: #000; }
+        .strength.medium { background: #ffa502; color: #000; }
+        .strength.low { background: #747d8c; }
+        .signal-type {
+            font-size: 0.85em;
+            color: #a4b0be;
+            margin-bottom: 5px;
+        }
+        .reason {
+            font-size: 0.95em;
+            padding: 8px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 5px;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: linear-gradient(135deg, rgba(102,126,234,0.3), rgba(118,75,162,0.3));
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        .stat-value { font-size: 2em; font-weight: bold; }
+        .stat-label { color: #a4b0be; font-size: 0.9em; }
+        .pump-dump-alert {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        .mover-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .positive { color: #00ff88; }
+        .negative { color: #ff4757; }
+        .live-dot {
+            width: 10px;
+            height: 10px;
+            background: #00ff88;
+            border-radius: 50%;
+            animation: blink 1s infinite;
+            display: inline-block;
+            margin-left: 5px;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+        .nav-links {
+            margin-top: 10px;
+        }
+        .nav-links a {
+            color: white;
+            text-decoration: none;
+            padding: 8px 20px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 20px;
+            margin: 0 5px;
+        }
+        .nav-links a:hover {
+            background: rgba(255,255,255,0.2);
+        }
+        #signal-list, #pump-dump-list {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .timestamp {
+            font-size: 0.8em;
+            color: #747d8c;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🚀 Crypto Futures Signal System</h1>
+        <div class="exchange-selector">
+            <span>صرافی: </span>
+            <select id="exchange-select" onchange="changeExchange(this.value)">
+                <option value="kucoin">KuCoin</option>
+                <option value="bybit">Bybit</option>
+                <option value="okx">OKX</option>
+                <option value="gate">Gate.io</option>
+                <option value="mexc">MEXC</option>
+                <option value="bitget">Bitget</option>
+            </select>
+        </div>
+        <div class="nav-links">
+            <a href="/">داشبورد</a>
+            <a href="/analytics">آمار و تحلیل</a>
+        </div>
+        <p style="margin-top:10px">
+            <span class="live-dot"></span>
+            <span id="status">در حال اتصال...</span>
+        </p>
+    </div>
+
+    <div class="container">
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value" id="total-signals">0</div>
+                <div class="stat-label">کل سیگنالها</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="buy-signals">0</div>
+                <div class="stat-label">سیگنال خرید</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="sell-signals">0</div>
+                <div class="stat-label">سیگنال فروش</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="pump-dump-count">0</div>
+                <div class="stat-label">پامپ/دامپ</div>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>📊 آخرین سیگنالها <span class="live-dot"></span></h2>
+                <div id="signal-list"></div>
+            </div>
+
+            <div class="card">
+                <h2>🚀 پامپ و دامپ <span class="live-dot"></span></h2>
+                <div id="pump-dump-list"></div>
+            </div>
+
+            <div class="card">
+                <h2>📈 برترین رشدها</h2>
+                <div id="gainers-list"></div>
+            </div>
+
+            <div class="card">
+                <h2>📉 بیشترین افت</h2>
+                <div id="losers-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let allSignals = [];
+        let pumpDumpAlerts = [];
+
+        socket.on('connect', () => {
+            document.getElementById('status').textContent = 'متصل ✅';
+        });
+
+        socket.on('disconnect', () => {
+            document.getElementById('status').textContent = 'قطع شده ❌';
+        });
+
+        socket.on('new_signals', (signals) => {
+            signals.forEach(sig => {
+                allSignals.unshift(sig);
+                if (sig.type && (sig.type.includes('PUMP') || sig.type.includes('DUMP'))) {
+                    pumpDumpAlerts.unshift(sig);
+                }
+            });
+            allSignals = allSignals.slice(0, 100);
+            pumpDumpAlerts = pumpDumpAlerts.slice(0, 50);
+            updateUI();
+        });
+
+        socket.on('cache_update', (cache) => {
+            allSignals = cache.signals || [];
+            pumpDumpAlerts = cache.pump_dump || [];
+            if (cache.movers) {
+                updateMovers(cache.movers);
+            }
+            updateUI();
+        });
+
+        function updateUI() {
+            // آمار
+            document.getElementById('total-signals').textContent = allSignals.length;
+            document.getElementById('buy-signals').textContent = 
+                allSignals.filter(s => s.signal === 'BUY').length;
+            document.getElementById('sell-signals').textContent = 
+                allSignals.filter(s => s.signal === 'SELL').length;
+            document.getElementById('pump-dump-count').textContent = pumpDumpAlerts.length;
+
+            // لیست سیگنالها
+            const signalList = document.getElementById('signal-list');
+            signalList.innerHTML = allSignals.slice(0, 20).map(sig => `
+                <div class="signal-item ${sig.signal?.toLowerCase() || ''}">
+                    <div class="signal-header">
+                        <span class="symbol">${sig.symbol || 'N/A'}</span>
+                        <span class="strength ${getStrengthClass(sig.strength)}">${sig.strength || 50}%</span>
+                    </div>
+                    <div class="signal-type">${sig.type || 'SIGNAL'} - ${sig.signal || 'NEUTRAL'}</div>
+                    <div class="reason">${sig.reason || ''}</div>
+                    <div class="timestamp">${formatTime(sig.detected_at || sig.timestamp)}</div>
+                </div>
+            `).join('');
+
+            // پامپ و دامپ
+            const pumpDumpList = document.getElementById('pump-dump-list');
+            pumpDumpList.innerHTML = pumpDumpAlerts.slice(0, 15).map(alert => `
+                <div class="signal-item pump-dump-alert ${alert.signal?.toLowerCase() || ''}">
+                    <div class="signal-header">
+                        <span class="symbol">${alert.symbol}</span>
+                        <span class="strength high">${alert.alert_type || alert.type}</span>
+                    </div>
+                    <div class="reason">${alert.reason || ''}</div>
+                    <div>
+                        <span class="${alert.price_change >= 0 ? 'positive' : 'negative'}">
+                            ${alert.price_change >= 0 ? '+' : ''}${alert.price_change?.toFixed(2) || 0}%
+                        </span>
+                        | حجم: +${alert.volume_change?.toFixed(0) || 0}%
+                    </div>
+                    <div class="timestamp">${formatTime(alert.detected_at || alert.timestamp)}</div>
+                </div>
+            `).join('');
+        }
+
+        function updateMovers(movers) {
+            const gainersList = document.getElementById('gainers-list');
+            gainersList.innerHTML = (movers.gainers || []).slice(0, 10).map(m => `
+                <div class="mover-item">
+                    <span>${m.symbol}</span>
+                    <span class="positive">+${m.change?.toFixed(2)}%</span>
+                </div>
+            `).join('');
+
+            const losersList = document.getElementById('losers-list');
+            losersList.innerHTML = (movers.losers || []).slice(0, 10).map(m => `
+                <div class="mover-item">
+                    <span>${m.symbol}</span>
+                    <span class="negative">${m.change?.toFixed(2)}%</span>
+                </div>
+            `).join('');
+        }
+
+        function getStrengthClass(strength) {
+            if (strength >= 80) return 'high';
+            if (strength >= 60) return 'medium';
+            return 'low';
+        }
+
+        function formatTime(ts) {
+            if (!ts) return '';
+            const date = new Date(ts);
+            return date.toLocaleTimeString('fa-IR');
+        }
+
+        function changeExchange(exchange) {
+            fetch('/api/exchange/change', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({exchange: exchange})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    alert('صرافی تغییر کرد به: ' + exchange);
+                    location.reload();
+                }
+            });
+        }
+
+        // بارگذاری اولیه
+        fetch('/api/signals').then(r => r.json()).then(data => {
+            allSignals = data;
+            updateUI();
+        });
+
+        fetch('/api/pump-dump').then(r => r.json()).then(data => {
+            pumpDumpAlerts = data;
+            updateUI();
+        });
+
+        fetch('/api/movers').then(r => r.json()).then(updateMovers);
+    </script>
+</body>
+</html>
+EOF
+
+echo "📊 Creating templates/analytics.html..."
+cat > templates/analytics.html << 'EOF'
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📊 آمار و تحلیل سیگنالها</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;700&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Vazirmatn', sans-serif;
+            background: linear-gradient(135deg, #0f0f23 0%, #1a1a3e 100%);
+            color: #fff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .header h1 { font-size: 2em; margin-bottom: 10px; }
+        .nav-links a {
+            color: white;
+            text-decoration: none;
+            padding: 8px 20px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 20px;
+            margin: 0 5px;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .stat-box {
+            background: linear-gradient(135deg, rgba(102,126,234,0.3), rgba(118,75,162,0.3));
+            padding: 25px;
+            border-radius: 15px;
+            text-align: center;
+        }
+        .stat-box .value { font-size: 2.5em; font-weight: bold; }
+        .stat-box .label { color: #a4b0be; margin-top: 5px; }
+        .chart-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .chart-card {
+            background: rgba(255,255,255,0.05);
+            border-radius: 15px;
+            padding: 20px;
+        }
+        .chart-card h3 { margin-bottom: 15px; }
+        .history-table {
+            background: rgba(255,255,255,0.05);
+            border-radius: 15px;
+            padding: 20px;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 12px;
+            text-align: right;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        th { background: rgba(102,126,234,0.3); }
+        .success { color: #00ff88; }
+        .failed { color: #ff4757; }
+        .active { color: #ffa502; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📊 آمار و تحلیل سیگنالها</h1>
+        <div class="nav-links">
+            <a href="/">داشبورد</a>
+            <a href="/analytics">آمار و تحلیل</a>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="stats-row">
+            <div class="stat-box">
+                <div class="value" id="total-signals">0</div>
+                <div class="label">کل سیگنالها</div>
+            </div>
+            <div class="stat-box">
+                <div class="value success" id="wins">0</div>
+                <div class="label">موفق</div>
+            </div>
+            <div class="stat-box">
+                <div class="value failed" id="losses">0</div>
+                <div class="label">ناموفق</div>
+            </div>
+            <div class="stat-box">
+                <div class="value" id="win-rate">0%</div>
+                <div class="label">نرخ موفقیت</div>
+            </div>
+            <div class="stat-box">
+                <div class="value" id="avg-profit">0%</div>
+                <div class="label">میانگین سود</div>
+            </div>
+        </div>
+
+        <div class="chart-grid">
+            <div class="chart-card">
+                <h3>📈 توزیع سیگنالها</h3>
+                <canvas id="signalChart"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>📊 نتایج اعتبارسنجی</h3>
+                <canvas id="validationChart"></canvas>
+            </div>
+        </div>
+
+        <div class="history-table">
+            <h3>📋 تاریخچه سیگنالها (7 روز اخیر)</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>نماد</th>
+                        <th>نوع</th>
+                        <th>جهت</th>
+                        <th>قیمت ورود</th>
+                        <th>قدرت</th>
+                        <th>وضعیت</th>
+                        <th>سود/زیان</th>
+                        <th>زمان</th>
+                    </tr>
+                </thead>
+                <tbody id="history-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        // بارگذاری آمار
+        fetch('/api/stats')
+            .then(r => r.json())
+            .then(stats => {
+                document.getElementById('total-signals').textContent = stats.total || 0;
+                document.getElementById('wins').textContent = stats.wins || 0;
+                document.getElementById('losses').textContent = stats.losses || 0;
+                
+                const winRate = stats.total > 0 ? ((stats.wins / stats.total) * 100).toFixed(1) : 0;
+                document.getElementById('win-rate').textContent = winRate + '%';
+                
+                const avgProfit = stats.avg_profit ? stats.avg_profit.toFixed(2) : 0;
+                document.getElementById('avg-profit').textContent = avgProfit + '%';
+
+                // نمودارها
+                new Chart(document.getElementById('signalChart'), {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['موفق', 'ناموفق', 'فعال'],
+                        datasets: [{
+                            data: [stats.wins || 0, stats.losses || 0, (stats.total - stats.wins - stats.losses) || 0],
+                            backgroundColor: ['#00ff88', '#ff4757', '#ffa502']
+                        }]
+                    },
+                    options: {
+                        plugins: {
+                            legend: { labels: { color: 'white' } }
+                        }
+                    }
+                });
+            });
+
+        // تاریخچه
+        fetch('/api/signals/history?days=7')
+            .then(r => r.json())
+            .then(signals => {
+                const tbody = document.getElementById('history-body');
+                tbody.innerHTML = signals.slice(0, 50).map(s => `
+                    <tr>
+                        <td>${s.symbol}</td>
+                        <td>${s.signal_type}</td>
+                        <td>${s.direction}</td>
+                        <td>${s.entry_price?.toFixed(6) || '-'}</td>
+                        <td>${s.strength}%</td>
+                        <td class="${s.validation_result?.toLowerCase() || 'active'}">
+                            ${s.validation_result || 'فعال'}
+                        </td>
+                        <td class="${(s.profit_loss || 0) >= 0 ? 'success' : 'failed'}">
+                            ${s.profit_loss ? s.profit_loss.toFixed(2) + '%' : '-'}
+                        </td>
+                        <td>${new Date(s.created_at).toLocaleString('fa-IR')}</td>
+                    </tr>
+                `).join('');
+            });
+    </script>
+</body>
+</html>
+EOF
+
+echo "🚀 Creating run.sh..."
+cat > run.sh << 'EOF'
+#!/bin/bash
+echo "🚀 Starting Crypto Futures Signal System..."
+source venv/bin/activate 2>/dev/null || true
+python app.py
+EOF
+chmod +x run.sh
+
+echo "📦 Creating install.sh..."
+cat > install.sh << 'EOF'
+#!/bin/bash
+echo "📦 Installing dependencies..."
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+echo "✅ Installation complete!"
+echo "Run: ./run.sh"
+EOF
+chmod +x install.sh
+
+cd ..
+
+echo ""
+echo "✅ =========================================="
+echo "   پروژه با موفقیت ایجاد شد!"
+echo "==========================================="
+echo ""
+echo "📁 پوشه: $PROJECT_DIR"
+echo ""
+echo "🚀 برای اجرا:"
+echo "   cd $PROJECT_DIR"
+echo "   ./install.sh"
+echo "   ./run.sh"
+echo ""
+echo "🌐 آدرس: http://localhost:5000"
+echo ""
+echo "📊 ویژگیها:"
+echo "   ✅ 250 ارز فیوچرز"
+echo "   ✅ صرافی KuCoin (بدون تحریم)"
+echo "   ✅ MA, EMA, RSI, MACD, BB, ATR"
+echo "   ✅ UT Bot Alert"
+echo "   ✅ تشخیص پامپ و دامپ"
+echo "   ✅ اعتبارسنجی هر 3 دقیقه"
+echo "   ✅ ذخیره در SQLite"
+echo "   ✅ صفحه آمار جداگانه"
+echo ""
+echo "💚 موفق باشی برادر!"
